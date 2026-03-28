@@ -180,15 +180,13 @@ input:focus{border-color:var(--acc);box-shadow:0 0 0 3px rgba(108,92,231,.15)}
 <div id="audios" style="display:none"></div>
 
 <script>
-var peer=null, myId=null, localStream=null, micActive=false;
-var audioCtx=null, analyser=null, volTick=null;
-var currentRoom=null, isHost=false;
+var peer=null,myId=null,localStream=null,micActive=false;
+var audioCtx=null,analyser=null,volTick=null;
+var currentRoom=null,isHost=false;
 var peers={};
 
-// ─── INIT PEER ────────────────────────────────────────────────────────────────
 function initPeer(){
   peer=new Peer(undefined,{host:'0.peerjs.com',port:443,secure:true});
-
   peer.on('open',function(id){
     myId=id;
     document.getElementById('myRoomDisplay').textContent=id;
@@ -197,169 +195,103 @@ function initPeer(){
     document.getElementById('joinBtn').disabled=false;
     lg('s','Connected to signaling server');
   });
-
   peer.on('error',function(err){
     setDot('err','Error: '+err.type);
     lg('e','Peer error: '+(err.message||err.type));
   });
-
-  // ─── INCOMING AUDIO CALL (someone is calling us) ───────────────────────────
-  // ALWAYS answer with our localStream so BOTH sides send audio to each other
   peer.on('call',function(call){
-    lg('i','Incoming call from '+sh(call.peer));
-    // Answer with our stream (even if mic is muted, stream exists)
     call.answer(localStream || new MediaStream());
-    call.on('stream',function(remoteStream){
-      addRemoteAudio(call.peer, remoteStream);
-      if(!peers[call.peer]) peers[call.peer]={};
-      // Save call ref — but don't overwrite if we already dialed them
-      if(!peers[call.peer].call) peers[call.peer].call=call;
+    call.on('stream',function(s){
+        addRemoteAudio(call.peer, s);
+        if(!peers[call.peer]) peers[call.peer] = {};
+        peers[call.peer].call = call;
     });
-    call.on('error',function(e){ lg('e','Call error: '+e); });
-    call.on('close',function(){ lg('w','Call closed: '+sh(call.peer)); });
-  });
+    // ✅ If we have a stream and haven't already called them back, do it now
+    if(localStream && (!peers[call.peer] || !peers[call.peer].callOut)){
+        if(!peers[call.peer]) peers[call.peer] = {};
+        var returnCall = peer.call(call.peer, localStream);
+        peers[call.peer].callOut = returnCall;
+        returnCall.on('stream', function(s){ addRemoteAudio(call.peer, s); });
+    }
+});
 
-  // ─── INCOMING DATA CONNECTION ─────────────────────────────────────────────
   peer.on('connection',function(conn){ setupConn(conn); });
 }
 
-// ─── SETUP DATA CONNECTION ────────────────────────────────────────────────────
 function setupConn(conn){
   conn.on('open',function(){
-    if(!peers[conn.peer]) peers[conn.peer]={};
+    if(!peers[conn.peer])peers[conn.peer]={};
     peers[conn.peer].conn=conn;
     lg('s','User '+sh(conn.peer)+' connected');
-    addCard(conn.peer, false);
+    addCard(conn.peer,false);
     updateCount();
-
-    // ✅ FIX: Host MUST call back the joining peer for bidirectional audio
-    // Without this, host's voice never reaches the joiner
-    if(isHost && localStream){
-      lg('i','Host calling back '+sh(conn.peer));
-      var call=peer.call(conn.peer, localStream);
-      peers[conn.peer].call=call;
-      call.on('stream',function(remoteStream){
-        addRemoteAudio(conn.peer, remoteStream);
-      });
-      call.on('error',function(e){ lg('e','Callback error: '+e); });
-    }
-
-    // Host sends member list to new joiner & notifies existing members
     if(isHost){
       var members=[myId].concat(Object.keys(peers).filter(function(x){return x!==conn.peer;}));
-      conn.send({t:'LIST', m:members});
-      Object.entries(peers).forEach(function(entry){
-        var pid=entry[0], p=entry[1];
-        if(pid!==conn.peer && p.conn && p.conn.open){
-          p.conn.send({t:'NEW', id:conn.peer});
-        }
+      conn.send({t:'LIST',m:members});
+      Object.entries(peers).forEach(function(e){
+        if(e[0]!==conn.peer&&e[1].conn&&e[1].conn.open) e[1].conn.send({t:'NEW',id:conn.peer});
       });
     }
   });
-
-  conn.on('data',function(d){ onData(conn.peer, d); });
-
-  conn.on('close',function(){
-    lg('w','User '+sh(conn.peer)+' left');
-    removePeer(conn.peer);
-  });
-
-  conn.on('error',function(e){ lg('e','Conn err: '+e); });
+  conn.on('data',function(d){ onData(conn.peer,d); });
+  conn.on('close',function(){ lg('w','User '+sh(conn.peer)+' left'); removePeer(conn.peer); });
+  conn.on('error',function(){});
 }
 
-// ─── HANDLE INCOMING DATA MESSAGES ────────────────────────────────────────────
-function onData(from, d){
+function onData(from,d){
   if(d.t==='LIST'){
-    // We just joined — connect to everyone the host told us about
-    lg('i','Room members: '+d.m.length);
-    d.m.forEach(function(pid){
-      if(pid!==myId && !peers[pid]) dial(pid);
-    });
-  } else if(d.t==='NEW'){
-    // A new peer joined — connect to them
-    if(d.id!==myId && !peers[d.id]) dial(d.id);
-  } else if(d.t==='SPK'){
-    // Speaking indicator update
+    d.m.forEach(function(pid){ if(pid!==myId&&!peers[pid]) dial(pid); });
+  }else if(d.t==='NEW'){
+    if(d.id!==myId&&!peers[d.id]) dial(d.id);
+  }else if(d.t==='SPK'){
     var card=document.getElementById('pc-'+from);
-    if(!card) return;
-    card.classList.toggle('speaking', d.v);
+    if(!card)return;
+    card.classList.toggle('speaking',d.v);
     var tag=card.querySelector('.ptag');
-    if(tag){
-      tag.className='ptag '+(d.v?'t-spk':'t-ok');
-      tag.textContent=d.v?'● SPEAKING':'● ONLINE';
-    }
+    if(tag){tag.className='ptag '+(d.v?'t-spk':'t-ok');tag.textContent=d.v?'● SPEAKING':'● ONLINE';}
   }
 }
 
-// ─── DIAL A PEER (data + audio both ways) ────────────────────────────────────
-// Called by guests when connecting to host or other peers
+// REPLACE dial() with:
 function dial(pid){
-  if(peers[pid] && peers[pid].conn && peers[pid].conn.open) return; // already connected
-  lg('i','Dialing '+sh(pid));
-
-  // Data channel
-  var conn=peer.connect(pid, {reliable:true});
-  if(!peers[pid]) peers[pid]={};
+  lg('i','Connecting to '+sh(pid));
+  var conn=peer.connect(pid,{reliable:true});
+  if(!peers[pid])peers[pid]={};
   peers[pid].conn=conn;
   setupConn(conn);
-
-  // ✅ Audio call — we call them, they answer us (peer.on('call') handles it on their end)
-  // This gives BOTH sides audio of EACH OTHER
   if(localStream){
-    var call=peer.call(pid, localStream);
-    peers[pid].call=call;
-    call.on('stream',function(remoteStream){
-      addRemoteAudio(pid, remoteStream);
-    });
-    call.on('error',function(e){ lg('e','Dial call error: '+e); });
+    var call=peer.call(pid,localStream);
+    peers[pid].callOut=call;  // ✅ track as outgoing
+    call.on('stream',function(s){ addRemoteAudio(pid,s); });
   }
 }
 
-// ─── MIC ACCESS ───────────────────────────────────────────────────────────────
 async function getMic(){
-  // Safety check for non-HTTPS environments
-  if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
-    var msg='Mic not available — HTTPS required on mobile (use https://)';
-    lg('e', msg); toast('❌ '+msg); return false;
-  }
   try{
-    localStream=await navigator.mediaDevices.getUserMedia({audio:true, video:false});
-    // Start muted — user manually unmutes
-    localStream.getAudioTracks().forEach(function(t){ t.enabled=false; });
+    localStream=await navigator.mediaDevices.getUserMedia({audio:true,video:false});
+    localStream.getAudioTracks().forEach(function(t){t.enabled=false;});
     document.getElementById('micBtn').disabled=false;
     startVol();
     lg('s','Microphone ready');
     return true;
-  } catch(e){
-    var msg=e.name==='NotAllowedError'
-      ? 'Mic permission denied — allow mic in browser settings'
-      : 'Mic error: '+e.message;
-    lg('e', msg); toast('🎤 '+msg); return false;
+  }catch(e){
+    var msg=e.name==='NotAllowedError'?'Mic permission denied — check browser settings':'Mic error: '+e.message;
+    lg('e',msg);toast('🎤 '+msg);return false;
   }
 }
 
-// ─── ATTACH REMOTE AUDIO ──────────────────────────────────────────────────────
-function addRemoteAudio(pid, stream){
-  // If audio element already exists, just update stream
-  if(peers[pid] && peers[pid].audio){
-    peers[pid].audio.srcObject=stream;
-    return;
-  }
-  var a=document.createElement('audio');
-  a.autoplay=true;
-  a.srcObject=stream;
-  // Mobile fix: muted=false explicitly
-  a.muted=false;
-  a.volume=1.0;
+function addRemoteAudio(pid,stream){
+  var a=peers[pid]&&peers[pid].audio;
+  if(a){a.srcObject=stream;return;}
+  a=document.createElement('audio');
+  a.autoplay=true;a.srcObject=stream;
   document.getElementById('audios').appendChild(a);
-  if(!peers[pid]) peers[pid]={};
+  if(!peers[pid])peers[pid]={};
   peers[pid].audio=a;
-  lg('s','Audio connected: '+sh(pid));
 }
 
-// ─── VOLUME MONITOR + SPEAKING DETECTION ─────────────────────────────────────
 function startVol(){
-  if(!localStream || audioCtx) return;
+  if(!localStream||audioCtx)return;
   try{
     audioCtx=new(window.AudioContext||window.webkitAudioContext)();
     var src=audioCtx.createMediaStreamSource(localStream);
@@ -368,50 +300,35 @@ function startVol(){
     src.connect(analyser);
     var buf=new Uint8Array(analyser.frequencyBinCount);
     var lastSpk=false;
-
     volTick=setInterval(function(){
-      if(!micActive){
-        document.getElementById('volFill').style.width='0%';
-        return;
-      }
+      if(!micActive){document.getElementById('volFill').style.width='0%';return;}
       analyser.getByteFrequencyData(buf);
       var avg=buf.reduce(function(a,b){return a+b;},0)/buf.length;
       document.getElementById('volFill').style.width=Math.min(100,avg*3.5)+'%';
-
       var spk=avg>8;
       if(spk!==lastSpk){
         lastSpk=spk;
-        // Tell all peers we're speaking or stopped
-        Object.values(peers).forEach(function(p){
-          if(p.conn&&p.conn.open) try{p.conn.send({t:'SPK',v:spk});}catch(e){}
-        });
-        // Update our own card
+        Object.values(peers).forEach(function(p){if(p.conn&&p.conn.open)try{p.conn.send({t:'SPK',v:spk});}catch(e){}});
         var mc=document.getElementById('pc-'+myId);
-        if(mc){
-          mc.classList.toggle('speaking',spk);
-          var tg=mc.querySelector('.ptag');
-          if(tg){tg.className='ptag '+(spk?'t-spk':'t-you');tg.textContent=spk?'● SPEAKING':'● YOU';}
-        }
+        if(mc){mc.classList.toggle('speaking',spk);var tg=mc.querySelector('.ptag');if(tg){tg.className='ptag '+(spk?'t-spk':'t-you');tg.textContent=spk?'● SPEAKING':'● YOU';}}
       }
     },80);
-  } catch(e){ lg('w','Volume monitor failed'); }
+  }catch(e){}
 }
 
-// ─── ROOM ACTIONS ─────────────────────────────────────────────────────────────
 async function hostRoom(){
-  if(!await getMic()) return;
-  isHost=true; currentRoom=myId;
+  if(!await getMic())return;
+  isHost=true;currentRoom=myId;
   showRoom(myId);
   lg('s','Room open — share your Room ID to invite others');
 }
 
 async function joinRoom(){
   var code=document.getElementById('roomInput').value.trim();
-  if(!code){ toast('Paste the Room ID first'); return; }
-  if(!await getMic()) return;
-  isHost=false; currentRoom=code;
+  if(!code){toast('Paste the Room ID first');return;}
+  if(!await getMic())return;
+  isHost=false;currentRoom=code;
   showRoom(code);
-  // Connect to host — host will call us back (setupConn → host calls back)
   dial(code);
 }
 
@@ -419,21 +336,21 @@ function showRoom(roomId){
   document.getElementById('joinPanel').classList.add('hidden');
   document.getElementById('roomPanel').classList.remove('hidden');
   document.getElementById('activeRoomDisplay').textContent=roomId;
-  addCard(myId, true);
+  addCard(myId,true);
   updateCount();
 }
 
 function leaveRoom(){
   Object.values(peers).forEach(function(p){
-    try{if(p.call) p.call.close();}catch(e){}
-    try{if(p.conn) p.conn.close();}catch(e){}
+    try{if(p.call)p.call.close();}catch(e){}
+    try{if(p.conn)p.conn.close();}catch(e){}
     try{if(p.audio){p.audio.srcObject=null;p.audio.remove();}}catch(e){}
   });
-  Object.keys(peers).forEach(function(k){ delete peers[k]; });
-  if(localStream){ localStream.getTracks().forEach(function(t){t.stop();}); localStream=null; }
-  if(volTick){ clearInterval(volTick); volTick=null; }
-  if(audioCtx){ try{audioCtx.close();}catch(e){} audioCtx=null; analyser=null; }
-  micActive=false; currentRoom=null; isHost=false;
+  Object.keys(peers).forEach(function(k){delete peers[k];});
+  if(localStream){localStream.getTracks().forEach(function(t){t.stop();});localStream=null;}
+  if(volTick){clearInterval(volTick);volTick=null;}
+  if(audioCtx){try{audioCtx.close();}catch(e){}audioCtx=null;analyser=null;}
+  micActive=false;currentRoom=null;isHost=false;
   document.getElementById('peersGrid').innerHTML='';
   document.getElementById('logBox').innerHTML='';
   document.getElementById('micBtn').className='mic-btn off';
@@ -445,47 +362,42 @@ function leaveRoom(){
   document.getElementById('joinPanel').classList.remove('hidden');
 }
 
-// ─── MIC TOGGLE ───────────────────────────────────────────────────────────────
 function toggleMic(){
   micActive=!micActive;
-  if(localStream) localStream.getAudioTracks().forEach(function(t){ t.enabled=micActive; });
+  if(localStream)localStream.getAudioTracks().forEach(function(t){t.enabled=micActive;});
   var btn=document.getElementById('micBtn');
   btn.className='mic-btn '+(micActive?'live':'off');
   btn.textContent=micActive?'🎙️':'🎤';
   document.getElementById('micLbl').textContent=micActive?'MIC IS LIVE — SPEAKING…':'MIC IS OFF — PRESS TO SPEAK';
   if(!micActive){
     document.getElementById('volFill').style.width='0%';
-    Object.values(peers).forEach(function(p){
-      if(p.conn&&p.conn.open) try{p.conn.send({t:'SPK',v:false});}catch(e){}
-    });
+    Object.values(peers).forEach(function(p){if(p.conn&&p.conn.open)try{p.conn.send({t:'SPK',v:false});}catch(e){}});
   }
 }
 
-// ─── PEER CARDS UI ────────────────────────────────────────────────────────────
 var EMOJIS=['🧑','👩','🧔','👩‍💻','🧑‍🎤','🧕','🧑‍🚀','👨‍🎨','🧑‍🔬','🧑‍🎓','👨‍💼','👩‍🎤'];
 var BGS=['#13132a','#1a1320','#13201a','#201a13','#131a20','#1a1328'];
 function eid(id){var h=0;for(var i=0;i<id.length;i++)h=(h*31+id.charCodeAt(i))>>>0;return EMOJIS[h%EMOJIS.length];}
 function ebg(id){var h=0;for(var i=0;i<id.length;i++)h=(h*17+id.charCodeAt(i))>>>0;return BGS[h%BGS.length];}
 
-function addCard(pid, isMe){
-  if(document.getElementById('pc-'+pid)) return;
+function addCard(pid,isMe){
+  if(document.getElementById('pc-'+pid))return;
   var grid=document.getElementById('peersGrid');
   var d=document.createElement('div');
-  d.className='pcard'; d.id='pc-'+pid;
-  d.innerHTML=
-    '<div class="av" style="background:'+ebg(pid)+'">'+eid(pid)+'<div class="av-ring"></div></div>'+
-    '<div class="pname">'+(isMe?'YOU':sh(pid))+'</div>'+
-    '<span class="ptag '+(isMe?'t-you':'t-ok')+'">'+(isMe?'● YOU':'● ONLINE')+'</span>';
+  d.className='pcard';d.id='pc-'+pid;
+  d.innerHTML='<div class="av" style="background:'+ebg(pid)+'">'+eid(pid)+'<div class="av-ring"></div></div>'
+    +'<div class="pname">'+(isMe?'YOU':sh(pid))+'</div>'
+    +'<span class="ptag '+(isMe?'t-you':'t-ok')+'">'+(isMe?'● YOU':'● ONLINE')+'</span>';
   grid.appendChild(d);
   updateCount();
 }
 
 function removePeer(pid){
   var el=document.getElementById('pc-'+pid);
-  if(el) el.remove();
+  if(el)el.remove();
   var p=peers[pid];
   if(p){
-    try{if(p.call) p.call.close();}catch(e){}
+    try{if(p.call)p.call.close();}catch(e){}
     try{if(p.audio){p.audio.srcObject=null;p.audio.remove();}}catch(e){}
     delete peers[pid];
   }
@@ -496,7 +408,6 @@ function updateCount(){
   document.getElementById('countBadge').textContent=document.querySelectorAll('.pcard').length||0;
 }
 
-// ─── TABS ─────────────────────────────────────────────────────────────────────
 function switchTab(t){
   document.getElementById('secC').classList.toggle('hidden',t!=='c');
   document.getElementById('secJ').classList.toggle('hidden',t!=='j');
@@ -504,11 +415,9 @@ function switchTab(t){
   document.getElementById('tabJ').classList.toggle('act',t==='j');
 }
 
-// ─── COPY ─────────────────────────────────────────────────────────────────────
-function copyMyId(){ navigator.clipboard.writeText(myId||'').then(function(){ toast('✅ Room ID copied! Share it.'); }); }
-function copyActiveId(){ navigator.clipboard.writeText(currentRoom||'').then(function(){ toast('✅ Room ID copied!'); }); }
+function copyMyId(){navigator.clipboard.writeText(myId||'').then(function(){toast('✅ Room ID copied! Share it.');});}
+function copyActiveId(){navigator.clipboard.writeText(currentRoom||'').then(function(){toast('✅ Room ID copied!');});}
 
-// ─── HELPERS ──────────────────────────────────────────────────────────────────
 function setDot(state,msg){
   document.getElementById('peerDot').className='dot '+(state==='on'?'on':state==='err'?'err':'');
   document.getElementById('peerStatus').textContent=msg;
@@ -516,7 +425,7 @@ function setDot(state,msg){
 
 function lg(lvl,msg){
   var box=document.getElementById('logBox');
-  if(!box) return;
+  if(!box)return;
   var now=new Date().toTimeString().slice(0,8);
   var e=document.createElement('div');
   e.className='le '+lvl;
@@ -525,17 +434,16 @@ function lg(lvl,msg){
   box.scrollTop=box.scrollHeight;
 }
 
-function sh(id){ return id?id.slice(0,8)+'…':'—'; }
+function sh(id){return id?id.slice(0,8)+'…':'—';}
 
 var toastT;
 function toast(msg){
   var el=document.getElementById('toast');
-  el.textContent=msg; el.classList.add('show');
+  el.textContent=msg;el.classList.add('show');
   clearTimeout(toastT);
-  toastT=setTimeout(function(){ el.classList.remove('show'); },3000);
+  toastT=setTimeout(function(){el.classList.remove('show');},3000);
 }
 
-// ─── BOOT ─────────────────────────────────────────────────────────────────────
 initPeer();
 </script>
 </body>
